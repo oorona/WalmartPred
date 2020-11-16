@@ -1,27 +1,100 @@
-mypredict = function() {
-  start_date <- ymd("2011-03-01") %m+% months(2 * (t - 1))
-  end_date <- ymd("2011-05-01") %m+% months(2 * (t - 1))
-  test_current <- test %>%
-    filter(Date >= start_date & Date < end_date) %>%
-    select(-IsHoliday)
+mypredict = function(){
   
-  if (t>1){
+  indexcols=c("Store","Dept")
+  indexcolsdate=c("Store","Dept","Date")
+  
+  if (t > 1){
     train <<- train %>% add_row(new_train)
   }
   
-  start_last_year = min(test_current$Date) - 375
-  end_last_year = max(test_current$Date) - 350
-  tmp_train <- train %>%
-    filter(Date > start_last_year & Date < end_last_year) %>%
-    mutate(Wk = ifelse(year(Date) == 2010, week(Date)-1, week(Date))) %>%
-    rename(Weekly_Pred = Weekly_Sales) %>%
-    select(-Date, -IsHoliday)
+  #Calculate Dates
+  sstart_date="2011-03-01"
+  send_date="2011-05-01"
   
-  test_current <- test_current %>%
-    mutate(Wk = week(Date))
+  start_date=ymd(sstart_date) %m+% months(2 * (t - 1))
+  end_date = ymd(send_date) %m+% months(2 * (t - 1))
+
+  # find data for testing between dates
+  test_split = test %>% 
+    filter(Date >= start_date & Date < end_date) %>% 
+    select(-IsHoliday) 
   
-  test_pred <- test_current %>%
-    left_join(tmp_train, by = c('Dept', 'Store', 'Wk')) %>%
-    select(-Wk)
+  
+  # find unique combinatios of stre and dept in both test and training
+  train_store_dept=train[, indexcols] %>% 
+    distinct(Store, Dept)
+  
+  test_store_dept=test_split[, indexcols] %>% 
+    distinct(Store, Dept) 
+  
+  common_store_dept=intersect(train_store_dept[, indexcols], test_store_dept[, indexcols])
+  
+  #Filter only relevant data 
+  train_split= common_store_dept %>% 
+    left_join(train, by = indexcols) %>% 
+    select(-IsHoliday) 
+  
+  # Find validate Dates
+  pred_dates=test_split %>% 
+    distinct(Date)
+  
+  report_dates=train_split %>% 
+    distinct(Date)
+  
+  # Create full set of date store and Dept
+  full_report_dates=report_dates %>% 
+    full_join(common_store_dept, by=character())
+  
+  full_pred_dates=pred_dates %>% 
+    full_join(common_store_dept, by=character())
+  
+  #Expand data to valid dates
+  train_store_dept_fix=full_report_dates %>% 
+    left_join(train_split,by=indexcolsdate) %>% 
+    replace_na(list(Weekly_Sales=0)) 
+  
+  test_store_dept_fix=full_pred_dates %>% 
+    left_join(test_split,by=indexcolsdate) %>% 
+    mutate(Weekly_Pred=0)
+  
+  #Transform data for faster processing
+  
+  train_data=train_store_dept_fix %>%  
+    pivot_wider(names_from = c(Store,Dept),values_from=Weekly_Sales)
+  
+  test_data=test_store_dept_fix %>%  
+    pivot_wider(names_from = c(Store,Dept),values_from=Weekly_Pred)
+  
+  num_forecasts=dim(test_data)[1]
+  
+
+  for (i in 1:nrow(common_store_dept)) {
+    #Seasonal Naive
+    predn=train_data[seq(nrow(train_data)-51,nrow(train_data)-51+num_forecasts-1),i+1]  
+    
+    #Tslm
+    data_ts = ts(train_data[,i+1], frequency=52) 
+    data_fit = tslm(data_ts ~ season + trend) 
+    predt = tibble(pred=forecast(data_fit, h = num_forecasts)$mean)
+    
+    predt =predt %>% 
+      mutate(pred=ifelse(pred<0,0,pred))
+    pred=0.25*predn+0.75*predt
+    test_data[,i+1]= pred    
+  }
+  
+  #Transform data back to normal
+  test_final=test_data %>%  
+    pivot_longer(!Date,names_to = c("Store","Dept"),values_to="Weekly_Pred",names_sep="_")
+  
+  test_final= test_final %>% 
+    mutate(Store=as.integer(Store)) %>% 
+    mutate(Dept=as.integer(Dept))
+  
+  # Select only data required for prediction
+  test_pred=test_split %>% 
+    inner_join(test_final, by=indexcolsdate)
+  
   return(test_pred)
 }
+
